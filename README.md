@@ -1,6 +1,6 @@
 # Raspberry Pi MPD Touch Radio
 
-A lightweight, touch-optimized Python UI for controlling an MPD (Music Player Daemon) server. Designed specifically for 3.5" Raspberry Pi touchscreens (480x320 or 320x240).
+A lightweight, touch-optimized Python UI for controlling an MPD (Music Player Daemon) server with Spotify Connect integration via Raspotify. Designed specifically for 3.5" Raspberry Pi touchscreens (480x320 or 320x240).
 
 ---
 
@@ -82,4 +82,89 @@ Enable and start the service:
 * Resolution: The script is optimized for 480x320. If your screen is 320x240, edit radio_ui.py and change the line self.setFixedSize(480, 320) to (320, 240).
 
 * Audio Issues: Ensure the pi user is part of the audio group. If there is no sound, check /etc/mpd.conf to verify the audio_output settings match your hardware.
+
+---
+
+## 6. Spotify Connect (Raspotify) Integration
+
+The UI supports displaying and controlling Spotify Connect playback via a local [Raspotify](https://github.com/dtcooper/raspotify) instance. A "Spotify" entry appears as the last item in the playlist and shows the currently playing track (artist and title) when Spotify is active.
+
+### How It Works
+
+- Raspotify runs [librespot](https://github.com/librespot-org/librespot) as a user-level systemd service, making the Pi visible as a Spotify Connect device.
+- Librespot's `--onevent` hook calls a shell script (`raspotify_event.sh`) on playback events, which writes the current state and track ID to `/tmp/raspotify_status`.
+- The Python UI reads that file every second and displays the playback state. Track names (artist and title) are resolved via Spotify's public embed page and cached in memory.
+
+### Mutual Exclusion
+
+Only one audio source plays at a time:
+
+- **Spotify starts while radio is playing**: The event script runs `mpc stop` to stop MPD. The UI also enforces this in its update loop as a fallback.
+- **Radio station selected while Spotify is playing**: The UI stops the raspotify service (`systemctl --user stop raspotify`) synchronously before starting MPD playback.
+- **Stop button**: Stops whichever source is currently active (MPD, Spotify, or both).
+- **Raspotify auto-restart**: When nothing is playing, the UI automatically restarts the raspotify service so the Pi remains discoverable on Spotify Connect.
+
+### Setup
+
+#### 1. Install Raspotify
+
+Follow the [official instructions](https://github.com/dtcooper/raspotify) or install via:
+
+    curl -sL https://dtcooper.github.io/raspotify/install.sh | sh
+
+#### 2. User-level systemd service
+
+Raspotify should run as a user-level systemd service (not system-level) so it has access to the session D-Bus and audio. Create `~/.config/systemd/user/raspotify.service`:
+
+    [Unit]
+    Description=Raspotify
+    Wants=pulseaudio.service
+
+    [Service]
+    Restart=always
+    RestartSec=10
+    Environment="DEVICE_NAME=raspotify (%H)"
+    Environment="BITRATE=160"
+    Environment="CACHE_ARGS=--disable-audio-cache"
+    Environment="VOLUME_ARGS=--enable-volume-normalisation --volume-ctrl linear --initial-volume=100"
+    Environment="BACKEND_ARGS=--backend alsa"
+    Environment="ONEVENT=--onevent /home/pi/pi-radio/raspotify_event.sh"
+    EnvironmentFile=-/etc/default/raspotify
+    ExecStart=/usr/bin/librespot --name ${DEVICE_NAME} $BACKEND_ARGS --bitrate ${BITRATE} $CACHE_ARGS $VOLUME_ARGS $ONEVENT $OPTIONS
+
+    [Install]
+    WantedBy=default.target
+
+Enable and start:
+
+    systemctl --user daemon-reload
+    systemctl --user enable raspotify
+    systemctl --user start raspotify
+
+#### 3. Event script
+
+Copy `raspotify_event.sh` to the Pi alongside `radio_ui.py` and make it executable:
+
+    cp raspotify_event.sh ~/pi-radio/
+    chmod +x ~/pi-radio/raspotify_event.sh
+
+The event script handles the following librespot events:
+
+| Event | Action |
+|-------|--------|
+| `start`, `playing`, `changed` | Writes `Playing` status + track ID to `/tmp/raspotify_status`, runs `mpc stop` |
+| `paused` | Writes `Paused` status + track ID |
+| `stopped` | Writes `Stopped` status |
+
+#### 4. Verify
+
+Play something from the Spotify app targeting the Pi. Then check:
+
+    cat /tmp/raspotify_status
+
+You should see JSON like:
+
+    {"status": "Playing", "track_id": "34K7nU8EWQIRI93RfqhdRJ"}
+
+The UI will display the Spotify entry as **▶ Spotify** with the resolved artist and track name below.
 
